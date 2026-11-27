@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather</title>
+<style>
+  :root { --bg:#eaf1f5; --card:#ffffff; --ink:#14232e; --muted:#5d7080; --accent:#1f6f8b; --line:#d5e0e7; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1a22; --card:#17252f; --ink:#e8f0f5; --muted:#97aab8; --accent:#6cc3de; --line:#273946; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; display:flex; justify-content:center; padding:24px 16px; }
+  main { width:100%; max-width:520px; }
+  form { display:flex; gap:8px; }
+  input { flex:1; padding:12px 14px; font-size:1rem; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); }
+  button { padding:12px 16px; font-size:1rem; border:0; border-radius:10px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:var(--card); color:var(--ink); border:1px solid var(--line); }
+  input:focus-visible, button:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  #status { margin:20px 0; color:var(--muted); min-height:1.4em; }
+  #status.error { color:#c0392b; }
+  .now { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:24px; }
+  .now h1 { margin:0; font-size:1.3rem; font-weight:600; }
+  .temp { font-size:4.5rem; font-weight:300; line-height:1; margin:12px 0 4px; }
+  .desc { color:var(--muted); margin:0 0 16px; }
+  .stats { display:flex; gap:24px; flex-wrap:wrap; color:var(--muted); font-size:.95rem; }
+  .stats b { color:var(--ink); font-weight:600; }
+  h2 { font-size:1rem; margin:24px 0 8px; font-weight:600; }
+  .days { display:grid; grid-template-columns:repeat(auto-fit, minmax(90px, 1fr)); gap:8px; }
+  .day { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; text-align:center; font-size:.9rem; }
+  .day .ic { font-size:1.6rem; }
+  .day .lo { color:var(--muted); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <form id="search">
+    <input id="city" name="city" placeholder="Search city, e.g. Karachi" autocomplete="off" aria-label="City name">
+    <button type="submit">Search</button>
+  </form>
+  <div class="row">
+    <button class="ghost" id="geo" type="button">Use my location</button>
+    <button class="ghost" id="unit" type="button">Switch to °F</button>
+  </div>
+
+  <p id="status" role="status"></p>
+
+  <section id="result" hidden>
+    <div class="now">
+      <h1 id="place"></h1>
+      <div class="temp" id="temp"></div>
+      <p class="desc" id="desc"></p>
+      <div class="stats">
+        <span>Feels like <b id="feels"></b></span>
+        <span>Humidity <b id="hum"></b></span>
+        <span>Wind <b id="wind"></b></span>
+      </div>
+    </div>
+    <h2>Next 5 days</h2>
+    <div class="days" id="days"></div>
+  </section>
+</main>
+
+<script>
+  // Open-Meteo: free, no API key needed.
+  const GEO_URL = "https://geocoding-api.open-meteo.com/v1/search";
+  const WX_URL = "https://api.open-meteo.com/v1/forecast";
+
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  let unit = "celsius";            // or "fahrenheit"
+  let current = null;              // { name, lat, lon }
+
+  // weather code -> [icon, text]
+  const CODES = {
+    0:["☀️","Clear sky"], 1:["🌤️","Mostly clear"], 2:["⛅","Partly cloudy"], 3:["☁️","Overcast"],
+    45:["🌫️","Fog"], 48:["🌫️","Fog"], 51:["🌦️","Light drizzle"], 53:["🌦️","Drizzle"], 55:["🌦️","Heavy drizzle"],
+    61:["🌧️","Light rain"], 63:["🌧️","Rain"], 65:["🌧️","Heavy rain"], 71:["🌨️","Light snow"], 73:["🌨️","Snow"],
+    75:["❄️","Heavy snow"], 80:["🌦️","Rain showers"], 81:["🌧️","Rain showers"], 82:["⛈️","Violent showers"],
+    95:["⛈️","Thunderstorm"], 96:["⛈️","Thunderstorm, hail"], 99:["⛈️","Thunderstorm, hail"]
+  };
+  const code = (c) => CODES[c] || ["🌡️", "Unknown"];
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.className = isError ? "error" : "";
+  }
+
+  async function getJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Network error. Please try again.");
+    return res.json();
+  }
+
+  async function findCity(query) {
+    const data = await getJSON(`${GEO_URL}?name=${encodeURIComponent(query)}&count=1`);
+    if (!data.results || !data.results.length) throw new Error(`No city found for "${query}". Check the spelling.`);
+    const r = data.results[0];
+    return { name: `${r.name}, ${r.country || ""}`.replace(/, $/, ""), lat: r.latitude, lon: r.longitude };
+  }
+
+  async function loadWeather(place) {
+    setStatus("Loading…");
+    try {
+      const u = unit === "celsius" ? "" : "&temperature_unit=fahrenheit&wind_speed_unit=mph";
+      const url = `${WX_URL}?latitude=${place.lat}&longitude=${place.lon}` +
+        `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code` +
+        `&daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=6&timezone=auto${u}`;
+      const w = await getJSON(url);
+      current = place;
+      render(place, w);
+      localStorage.setItem("lastPlace", JSON.stringify(place));
+      setStatus("");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  }
+
+  function render(place, w) {
+    const sym = unit === "celsius" ? "°C" : "°F";
+    const windU = unit === "celsius" ? "km/h" : "mph";
+    const c = w.current;
+    $("place").textContent = place.name;
+    $("temp").textContent = `${Math.round(c.temperature_2m)}${sym}`;
+    $("desc").textContent = `${code(c.weather_code)[0]} ${code(c.weather_code)[1]}`;
+    $("feels").textContent = `${Math.round(c.apparent_temperature)}${sym}`;
+    $("hum").textContent = `${c.relative_humidity_2m}%`;
+    $("wind").textContent = `${Math.round(c.wind_speed_10m)} ${windU}`;
+
+    $("days").innerHTML = w.daily.time.slice(1, 6).map((d, i) => {
+      const k = i + 1;
+      const name = new Date(d + "T00:00").toLocaleDateString(undefined, { weekday: "short" });
+      return `<div class="day">
+        <div>${name}</div>
+        <div class="ic">${code(w.daily.weather_code[k])[0]}</div>
+        <div>${Math.round(w.daily.temperature_2m_max[k])}°</div>
+        <div class="lo">${Math.round(w.daily.temperature_2m_min[k])}°</div>
+      </div>`;
+    }).join("");
+    $("result").hidden = false;
+  }
+
+  $("search").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = $("city").value.trim();
+    if (!q) return setStatus("Type a city name first.", true);
+    setStatus("Searching…");
+    try { await loadWeather(await findCity(q)); }
+    catch (err) { setStatus(err.message, true); }
+  });
+
+  $("geo").addEventListener("click", () => {
+    if (!navigator.geolocation) return setStatus("Your browser does not support location.", true);
+    setStatus("Getting your location…");
+    navigator.geolocation.getCurrentPosition(
+      (p) => loadWeather({ name: "Your location", lat: p.coords.latitude, lon: p.coords.longitude }),
+      () => setStatus("Location blocked. Search for a city instead.", true)
+    );
+  });
+
+  $("unit").addEventListener("click", () => {
+    unit = unit === "celsius" ? "fahrenheit" : "celsius";
+    $("unit").textContent = unit === "celsius" ? "Switch to °F" : "Switch to °C";
+    if (current) loadWeather(current);
+  });
+
+  // On load: show the last searched place, or Karachi.
+  (function init() {
+    let place = { name: "Karachi, Pakistan", lat: 24.8607, lon: 67.0011 };
+    try { place = JSON.parse(localStorage.getItem("lastPlace")) || place; } catch (_) {}
+    loadWeather(place);
+  })();
+</script>
+</body>
+</html>
